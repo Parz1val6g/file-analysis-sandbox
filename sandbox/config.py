@@ -8,6 +8,17 @@ FIXTURES_DIR = os.path.join(ROOT_DIR, "fixtures")
 DOCKER_DIR = os.path.join(ROOT_DIR, "docker")
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 
+# --- Host-side input validation ---
+# Maximum file size in bytes (default 500 MB, overridable via SANDBOX_MAX_FILE_SIZE env var)
+_MAX_SIZE_ENV = os.environ.get("SANDBOX_MAX_FILE_SIZE")
+if _MAX_SIZE_ENV:
+    try:
+        MAX_FILE_SIZE_BYTES = int(_MAX_SIZE_ENV)
+    except ValueError:
+        MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024
+else:
+    MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024
+
 # --- Layer 1: Magic byte signatures ---
 # Maps lowercase file extension to expected header bytes + offset
 MAGIC_BYTES = {
