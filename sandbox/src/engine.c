@@ -53,7 +53,7 @@ static void sig_handler(int sig) {
         "{\"status\":\"error\",\"reason\":\"Engine interrupted\"}\n";
     (void)sig;
     g_interrupted = 1;
-    (void)write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    { ssize_t _r = write(STDOUT_FILENO, msg, sizeof(msg) - 1); (void)_r; }
     _exit(1);
 }
 #endif
