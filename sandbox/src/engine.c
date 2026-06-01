@@ -17,6 +17,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #include "validation.h"
@@ -28,24 +30,30 @@
 #define VERSION "1.0.0"
 
 /* ---- Global for signal handler ---- */
-static volatile int g_interrupted = 0;
+static volatile sig_atomic_t g_interrupted = 0;
 
 #ifdef _WIN32
 static BOOL WINAPI ctrl_handler(DWORD ctrl_type) {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) {
+        static const char msg[] =
+            "{\"status\":\"error\",\"reason\":\"Engine interrupted\"}\n";
+        DWORD written;
         g_interrupted = 1;
-        /* Emit error JSON immediately before the OS kills us */
-        fprintf(stdout, "{\"status\":\"error\",\"reason\":\"Engine interrupted by signal\"}\n");
-        fflush(stdout);
-        return TRUE; /* We handled it */
+        /* WriteFile is safe to call from a console ctrl handler */
+        WriteFile(GetStdHandle(STD_OUTPUT_HANDLE),
+                  msg, (DWORD)(sizeof(msg) - 1), &written, NULL);
+        return TRUE;
     }
     return FALSE;
 }
 #else
 static void sig_handler(int sig) {
+    /* Only async-signal-safe operations permitted here */
+    static const char msg[] =
+        "{\"status\":\"error\",\"reason\":\"Engine interrupted\"}\n";
+    (void)sig;
     g_interrupted = 1;
-    fprintf(stdout, "{\"status\":\"error\",\"reason\":\"Engine interrupted by signal %d\"}\n", sig);
-    fflush(stdout);
+    (void)write(STDOUT_FILENO, msg, sizeof(msg) - 1);
     _exit(1);
 }
 #endif
@@ -84,6 +92,7 @@ static void print_help(void) {
 
 int main(int argc, char *argv[]) {
     char error[512];
+    char resolved_path[4096] = "";
     Layer1Result l1 = {0};
     Layer2Result l2 = {0};
     Layer3Result l3 = {0};
@@ -117,7 +126,8 @@ int main(int argc, char *argv[]) {
     file_path = argv[1];
 
     /* ---- Input validation ---- */
-    if (validate_input(file_path, error, sizeof(error)) != 0) {
+    if (validate_input(file_path, resolved_path, sizeof(resolved_path),
+                       error, sizeof(error)) != 0) {
         if (json_init(&jb, 512) == 0) {
             json_obj_open(&jb);
             json_add_str(&jb, "status", "error");
@@ -130,6 +140,8 @@ int main(int argc, char *argv[]) {
         }
         return 1;
     }
+    /* All subsequent operations use the resolved canonical path */
+    file_path = resolved_path;
 
     /* ==== LAYER 1: Magic Bytes ==== */
     if (g_interrupted) { emit("{\"status\":\"error\",\"reason\":\"Interrupted\"}"); return 1; }
@@ -204,12 +216,28 @@ int main(int argc, char *argv[]) {
 
         json_nested_open(&jb, "metadata");
 
-        /* Validate container output before appending raw JSON */
+        /* Append container metadata fields.
+         * extractor outputs a full JSON object {"key":"val",...}.
+         * json_nested_open already emitted the opening '{', so we strip
+         * the outer braces and append only the inner key:value pairs to
+         * avoid producing the invalid double-brace fragment {"metadata":{{...}}}. */
         if (l3.metadata_json[0]) {
             const char *raw = l3.metadata_json;
-            while (*raw == ' ' || *raw == '\n' || *raw == '\r') raw++;
-            if (*raw == '{' || *raw == '[')
-                json_append_raw(&jb, raw);
+            size_t rlen;
+            while (*raw == ' ' || *raw == '\n' || *raw == '\r' || *raw == '\t') raw++;
+            rlen = strlen(raw);
+            while (rlen > 0 && (raw[rlen-1] == ' ' || raw[rlen-1] == '\n' ||
+                                 raw[rlen-1] == '\r' || raw[rlen-1] == '\t'))
+                rlen--;
+            if (rlen >= 2 && raw[0] == '{' && raw[rlen-1] == '}') {
+                /* Copy inner fields (strip outer braces) */
+                char inner[16384];
+                size_t inner_len = rlen - 2;
+                memcpy(inner, raw + 1, inner_len);
+                inner[inner_len] = '\0';
+                if (inner_len > 0)
+                    json_append_raw(&jb, inner);
+            }
         }
 
         if (clamav_skipped) {

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
 #define JSON_MIN_CAP 256
 
@@ -15,8 +16,13 @@ static int json_grow(JsonBuf *j, size_t needed) {
     char *new_buf;
 
     if (j->cap - j->len > needed) return 0;
+    /* Guard against size_t wraparound in the doubling loop */
+    if (j->cap > (size_t)-1 / 2) return -1;
     new_cap = j->cap ? j->cap * 2 : JSON_MIN_CAP;
-    while (new_cap - j->len <= needed) new_cap *= 2;
+    while (new_cap - j->len <= needed) {
+        if (new_cap > (size_t)-1 / 2) return -1;
+        new_cap *= 2;
+    }
     new_buf = (char *)realloc(j->buf, new_cap);
     if (!new_buf) return -1;
     j->buf = new_buf;
@@ -117,7 +123,7 @@ void json_add_str(JsonBuf *j, const char *key, const char *value) {
 
 void json_add_int(JsonBuf *j, const char *key, long long value) {
     char num[32];
-    int n = snprintf(num, sizeof(num), "%lld", value);
+    int n = snprintf(num, sizeof(num), "%" PRId64, (int64_t)value);
     json_comma(j);
     json_escape_and_append(j, key);
     json_grow(j, (size_t)n + 2);

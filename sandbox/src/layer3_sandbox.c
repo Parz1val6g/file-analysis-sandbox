@@ -68,9 +68,8 @@ static int docker_available(void) {
 
 /* Check if sandbox image exists; build only if missing */
 static int ensure_sandbox_image(char *error, size_t error_size) {
-    char *inspect_argv[4];
+    char *inspect_argv[5];
     char stdout_buf[4096], stderr_buf[4096];
-    char build_err[1024];
     int exit_code, ret;
     char root[1024];
     char dockerfile[2048];
@@ -119,7 +118,6 @@ static int ensure_sandbox_image(char *error, size_t error_size) {
 /* Convert Windows path to Docker-compatible format (host_mnt style) */
 static void to_docker_path(const char *win_path, char *out, size_t out_size) {
     size_t i, j = 0;
-    int has_drive = 0;
 
     for (i = 0; win_path[i] && j < out_size - 1; i++) {
         if (win_path[i] == '\\')
@@ -138,17 +136,6 @@ static void to_docker_path(const char *win_path, char *out, size_t out_size) {
     }
 }
 
-/* Kill a Docker container by ID */
-static void docker_rm(const char *container_id) {
-    char *argv[4];
-    argv[0] = (char *)"docker";
-    argv[1] = (char *)"rm";
-    argv[2] = (char *)"-f";
-    argv[3] = (char *)container_id;
-    argv[4] = NULL;
-    int dummy;
-    subprocess_run("docker", argv, 5, &dummy, NULL, 0, NULL, 0);
-}
 
 Layer3Result layer3_execute(const char *file_path) {
     Layer3Result r;

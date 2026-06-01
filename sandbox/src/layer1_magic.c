@@ -51,7 +51,7 @@ static const MagicEntry MAGIC_BYTES[] = {
 /* Known executable signatures (high-risk) */
 static const ExecSig EXEC_SIGS[] = {
     {"MZ",            2, "Windows/DOS Executable (PE/COFF)"},
-    {"\x7fELF",       4, "Unix/Linux ELF Binary"},
+    {"\x7f" "ELF",    4, "Unix/Linux ELF Binary"},
     {"\xca\xfe\xba\xbe", 4, "macOS Mach-O Fat Binary"},
     {"\xce\xfa\xed\xfe", 4, "macOS Mach-O 32-bit"},
     {"\xcf\xfa\xed\xfe", 4, "macOS Mach-O 64-bit"},

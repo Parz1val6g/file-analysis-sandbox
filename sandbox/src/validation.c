@@ -16,12 +16,15 @@
 #include <limits.h>
 #endif
 
-int validate_input(const char *path, char *error, size_t error_size) {
+int validate_input(const char *path,
+                   char *resolved_out, size_t resolved_size,
+                   char *error, size_t error_size) {
     struct stat st;
     char resolved[4096];
     const char *p;
 
     if (!path || !error || error_size == 0) return -1;
+    if (resolved_out && resolved_size > 0) resolved_out[0] = '\0';
 
     /* Resolve real path */
 #ifdef _WIN32
@@ -83,6 +86,12 @@ int validate_input(const char *path, char *error, size_t error_size) {
         }
         p++;
     }
+
+    /* Export the canonical path so callers can use it for all subsequent
+     * file operations, minimising the TOCTOU window between validation
+     * and the actual opens performed by each security layer. */
+    if (resolved_out && resolved_size > 0)
+        snprintf(resolved_out, resolved_size, "%s", resolved);
 
     return 0;
 }

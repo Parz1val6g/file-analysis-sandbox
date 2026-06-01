@@ -4,6 +4,8 @@
  * No shell, no cmd.exe — immune to command injection.
  * Pipes are read concurrently to prevent deadlocks.
  */
+
+
 #include "subprocess.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -135,6 +137,7 @@ int subprocess_which(const char *cmd) {
 /* Read available data from a pipe handle */
 static DWORD drain_pipe(HANDLE h, char *buf, size_t bufsize, size_t *total) {
     DWORD avail, nread;
+    if (!buf || bufsize == 0) return 0;
     if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0)
         return 0;
     if (*total >= bufsize - 1)
@@ -168,6 +171,8 @@ int subprocess_run(
     DWORD wait_result;
     int ret = -1;
     size_t out_total = 0, err_total = 0;
+    DWORD start_tick = 0;
+    DWORD timeout_ms  = 0;
 
     (void)cmd; /* argv[0] is the actual executable; cmd is kept for API compatibility */
 
@@ -205,13 +210,36 @@ int subprocess_run(
     CloseHandle(h_stdout_wr); h_stdout_wr = NULL;
     CloseHandle(h_stderr_wr); h_stderr_wr = NULL;
 
+    /* Record wall-clock start for timeout tracking.
+     * GetTickCount() is 32-bit and wraps every ~49 days; unsigned subtraction
+     * gives the correct elapsed time even across the wrap boundary. */
+    if (timeout_sec > 0) {
+        start_tick = GetTickCount();
+        timeout_ms  = (DWORD)timeout_sec * 1000U;
+    }
+
     /* Wait loop with concurrent pipe draining (prevents deadlocks) */
     for (;;) {
-        DWORD remaining = (DWORD)(timeout_sec > 0 ? timeout_sec * 1000 : INFINITE);
+        DWORD remaining;
+        HANDLE handles[3];
+        DWORD nhandles = 0;
 
-        /* Wait for process exit OR pipe data */
-        HANDLE handles[3] = { pi.hProcess, h_stdout_rd, h_stderr_rd };
-        DWORD nhandles = 1;
+        /* Compute remaining time against wall-clock start (not reset per iter) */
+        if (timeout_sec > 0) {
+            DWORD elapsed = GetTickCount() - start_tick; /* safe across wrap */
+            if (elapsed >= timeout_ms) {
+                TerminateProcess(pi.hProcess, 1);
+                ret = -2;
+                if (exit_code) *exit_code = -1;
+                goto cleanup;
+            }
+            remaining = timeout_ms - elapsed;
+        } else {
+            remaining = INFINITE;
+        }
+
+        /* Build handle list: always process first, then any live pipe handles */
+        handles[nhandles++] = pi.hProcess;
         if (h_stdout_rd) handles[nhandles++] = h_stdout_rd;
         if (h_stderr_rd) handles[nhandles++] = h_stderr_rd;
 
@@ -225,9 +253,11 @@ int subprocess_run(
 
         if (wait_result == WAIT_OBJECT_0) {
             /* Process exited — drain remaining pipe data */
-            Sleep(50); /* Small grace period for final pipe flush */
-            if (stdout_buf) drain_pipe(h_stdout_rd, stdout_buf, stdout_size, &out_total);
-            if (stderr_buf) drain_pipe(h_stderr_rd, stderr_buf, stderr_size, &err_total);
+            Sleep(50); /* grace period: kernel may still be flushing pipe buffers */
+            if (stdout_buf && stdout_size > 1)
+                drain_pipe(h_stdout_rd, stdout_buf, stdout_size, &out_total);
+            if (stderr_buf && stderr_size > 1)
+                drain_pipe(h_stderr_rd, stderr_buf, stderr_size, &err_total);
             ret = 0;
             break;
         }

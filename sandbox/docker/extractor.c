@@ -14,11 +14,28 @@
 
 #define MAX_BUF 65536
 
+/* Reject paths that contain shell metacharacters.
+ * extractor always receives the fixed mount point /sandbox/input_file,
+ * but this guard prevents shell injection if the caller ever changes. */
+static int is_safe_path(const char *path) {
+    const char *p;
+    if (!path || !*path) return 0;
+    for (p = path; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == '"' || c == '\'' || c == '`' ||
+            c == '$' || c == ';'  || c == '&'  || c == '|' ||
+            c == '(' || c == ')'  || c == '<'  || c == '>')
+            return 0;
+    }
+    return 1;
+}
+
 /* Read entire output from popen, return malloc'd string. Caller frees. */
 static char *read_cmd(const char *cmd) {
     FILE *fp;
     char *buf;
     size_t len = 0, cap = 4096;
+    int n_arg;
 
     buf = (char *)malloc(cap);
     if (!buf) return NULL;
@@ -27,7 +44,8 @@ static char *read_cmd(const char *cmd) {
     fp = popen(cmd, "r");
     if (!fp) { free(buf); return NULL; }
 
-    while (fgets(buf + len, (int)(cap - len), fp)) {
+    n_arg = (cap - len > (size_t)32767) ? 32767 : (int)(cap - len);
+    while (fgets(buf + len, n_arg, fp)) {
         len = strlen(buf);
         if (cap - len < 1024) {
             cap *= 2;
@@ -35,6 +53,7 @@ static char *read_cmd(const char *cmd) {
             if (!tmp) { free(buf); pclose(fp); return NULL; }
             buf = tmp;
         }
+        n_arg = (cap - len > (size_t)32767) ? 32767 : (int)(cap - len);
     }
     pclose(fp);
 
@@ -115,6 +134,10 @@ int main(int argc, char *argv[]) {
 
     if (argc != 2) {
         fprintf(stderr, "Usage: extractor <file_path>\n");
+        return 1;
+    }
+    if (!is_safe_path(argv[1])) {
+        fprintf(stderr, "extractor: unsafe path argument\n");
         return 1;
     }
 
