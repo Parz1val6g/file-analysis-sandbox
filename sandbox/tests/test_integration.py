@@ -221,3 +221,30 @@ class TestConfigConstants:
         from config import SANDBOX_TIMEOUT_SECONDS, SANDBOX_MEMORY_LIMIT
         assert SANDBOX_TIMEOUT_SECONDS > 0
         assert "m" in SANDBOX_MEMORY_LIMIT.lower()
+
+
+class TestClamavBypass:
+    """Validates that ClamAV unavailability gracefully bypasses Layer 2."""
+
+    def test_clamav_unavailable_does_not_block_pipeline(self):
+        """Engine must not halt when ClamAV is missing — continues to Layer 3."""
+        result = run_engine(os.path.join(FIXTURES_DIR, "valid.pdf"))
+        assert result["status"] in ("clean", "error")
+        # If error, it must be from Layer 3 (Docker), not Layer 2
+        if result["status"] == "error":
+            reason = result.get("reason", "")
+            assert "Layer 2" not in reason
+
+    def test_clamav_bypass_appears_in_metadata(self):
+        """When result is clean, metadata must have clamav_skipped flag."""
+        result = run_engine(os.path.join(FIXTURES_DIR, "valid.pdf"))
+        if result["status"] == "clean":
+            meta = result.get("metadata", {})
+            assert "clamav_skipped" in meta
+            assert meta["clamav_skipped"] is True
+            assert "clamav_skip_reason" in meta
+
+    def test_malformed_header_still_halts(self):
+        """Layer 1 infected detection still halts the pipeline immediately."""
+        result = run_engine(os.path.join(FIXTURES_DIR, "malformed_header.pdf"))
+        assert result["status"] == "infected"
