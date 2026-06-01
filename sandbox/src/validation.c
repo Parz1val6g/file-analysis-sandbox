@@ -21,7 +21,6 @@ int validate_input(const char *path,
                    char *error, size_t error_size) {
     struct stat st;
     char resolved[4096];
-    const char *p;
 
     if (!path || !error || error_size == 0) return -1;
     if (resolved_out && resolved_size > 0) resolved_out[0] = '\0';
@@ -73,18 +72,6 @@ int validate_input(const char *path,
     if (access(resolved, R_OK) != 0) {
         snprintf(error, error_size, "Permission denied: cannot read file");
         return -1;
-    }
-
-    /* Path traversal check */
-    p = resolved;
-    while (*p) {
-        if (p[0] == '.' && p[1] == '.' &&
-            (p == resolved || *(p-1) == '/' || *(p-1) == '\\')) {
-            /* Only flag obvious traversal patterns */
-            /* We use realpath above which already resolves these */
-            break;
-        }
-        p++;
     }
 
     /* Export the canonical path so callers can use it for all subsequent

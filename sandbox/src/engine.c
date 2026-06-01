@@ -202,7 +202,7 @@ int main(int argc, char *argv[]) {
     log_msg("Layer 3: Sandbox execution...");
     l3 = layer3_execute(file_path);
 
-    if (json_init(&jb, 4096) != 0) {
+    if (json_init(&jb, sizeof(l3.metadata_json) + 512) != 0) {
         emit("{\"status\":\"error\",\"reason\":\"JSON buffer allocation failed\"}");
         return 1;
     }

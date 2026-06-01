@@ -33,6 +33,13 @@ else
     DEBUG_CFLAGS   = -Wall -Wextra -g -O0 \
                      -fsanitize=address,undefined \
                      -fno-omit-frame-pointer
+    ifeq ($(OS),Windows_NT)
+        # PE hardening: ASLR (DYNAMIC_BASE) + DEP (NX_COMPAT)
+        RELEASE_LDFLAGS = -Wl,--dynamicbase,--nxcompat
+    else
+        # ELF hardening: Full RELRO (read-only GOT) + explicit PIE
+        RELEASE_LDFLAGS = -pie -Wl,-z,relro,-z,now
+    endif
 endif
 
 SRCS     = $(wildcard $(SRCDIR)/*.c)
@@ -44,7 +51,8 @@ OBJS     = $(patsubst $(SRCDIR)/%.c,$(SRCDIR)/%.o,$(SRCS))
 
 all: release
 
-release: CFLAGS = $(RELEASE_CFLAGS)
+release: CFLAGS  = $(RELEASE_CFLAGS)
+release: LDFLAGS = $(RELEASE_LDFLAGS)
 release: $(TARGET)
 
 $(TARGET): $(OBJS)
