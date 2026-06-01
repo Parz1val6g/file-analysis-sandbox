@@ -11,7 +11,7 @@ set TESTER=sandbox\test_runner.exe
 
 if not exist "%TCC%" (
     echo TCC not found. Downloading...
-    powershell -Command "Invoke-WebRequest -Uri 'https://download.savannah.gnu.org/releases/tinycc/tcc-0.9.27-win64-bin.zip' -OutFile '%TEMP%\tcc.zip' -UseBasicParseling" 2>nul
+    powershell -Command "Invoke-WebRequest -Uri 'https://download.savannah.gnu.org/releases/tinycc/tcc-0.9.27-win64-bin.zip' -OutFile '%TEMP%\tcc.zip' -UseBasicParsing" 2>nul
     powershell -Command "Expand-Archive -Path '%TEMP%\tcc.zip' -DestinationPath '%TEMP%\tcc' -Force" 2>nul
     if not exist "%TCC%" (
         echo Failed to install TCC. Please install manually.
@@ -37,14 +37,14 @@ echo   Test runner: OK
 
 echo.
 echo Running tests...
-cd sandbox
-%TESTER%
+pushd sandbox
+.\test_runner.exe
 set TESTRC=%ERRORLEVEL%
-cd ..
+popd
 
-if %TESTRC% equ 0 (
+if "%TESTRC%"=="0" (
     echo All tests PASSED
 ) else (
-    echo %TESTRC% test(s) FAILED
+    echo Tests FAILED: %TESTRC%
 )
 exit /b %TESTRC%
