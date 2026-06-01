@@ -1,15 +1,16 @@
-/* Secure subprocess execution — Windows API implementation.
+/* Secure subprocess execution.
  *
- * Uses CreateProcessW (Unicode) with explicit argument passing.
- * No shell, no cmd.exe — immune to command injection.
- * Pipes are read concurrently to prevent deadlocks.
+ * Windows: CreateProcessW with explicit argument passing — no shell, no cmd.exe.
+ * Linux:   fork/execvp with poll-based pipe draining — no system()/popen().
+ * Both implementations are immune to command injection.
  */
-
 
 #include "subprocess.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
 #include <windows.h>
 
 #define MAX_CMDLINE 32768
@@ -288,3 +289,170 @@ cleanup:
     if (pi.hThread)  CloseHandle(pi.hThread);
     return ret;
 }
+
+#else /* POSIX / Linux */
+
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <poll.h>
+#include <errno.h>
+#include <limits.h>
+#include <time.h>
+
+int subprocess_which(const char *cmd) {
+    char test_path[PATH_MAX];
+    char path_copy[32768];
+    char *path_env, *dir;
+
+    if (cmd[0] == '/')
+        return access(cmd, X_OK) == 0 ? 1 : 0;
+
+    path_env = getenv("PATH");
+    if (!path_env) return 0;
+
+    strncpy(path_copy, path_env, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+
+    dir = strtok(path_copy, ":");
+    while (dir) {
+        snprintf(test_path, sizeof(test_path), "%s/%s", dir, cmd);
+        if (access(test_path, X_OK) == 0) return 1;
+        dir = strtok(NULL, ":");
+    }
+    return 0;
+}
+
+static void drain_fd(int fd, char *buf, size_t bufsize, size_t *total, int *open) {
+    char discard[256];
+    char *dst;
+    size_t avail;
+    ssize_t n;
+
+    if (buf && *total < bufsize - 1) {
+        dst   = buf + *total;
+        avail = bufsize - *total - 1;
+    } else {
+        dst   = discard;
+        avail = sizeof(discard);
+    }
+
+    n = read(fd, dst, avail);
+    if (n > 0) {
+        if (dst != discard) {
+            *total += (size_t)n;
+            buf[*total] = '\0';
+        }
+    } else {
+        *open = 0;
+    }
+}
+
+int subprocess_run(
+    const char *cmd,
+    char *const argv[],
+    int timeout_sec,
+    int *exit_code,
+    char *stdout_buf,
+    size_t stdout_size,
+    char *stderr_buf,
+    size_t stderr_size
+) {
+    int out_pipe[2], err_pipe[2];
+    pid_t pid;
+    int ret = -1;
+    size_t out_total = 0, err_total = 0;
+    int out_open = 1, err_open = 1;
+    struct timespec deadline;
+
+    (void)cmd;
+
+    if (!argv) return -1;
+    if (stdout_buf && stdout_size > 0) stdout_buf[0] = '\0';
+    if (stderr_buf && stderr_size > 0) stderr_buf[0] = '\0';
+
+    if (pipe(out_pipe) != 0) return -1;
+    if (pipe(err_pipe) != 0) { close(out_pipe[0]); close(out_pipe[1]); return -1; }
+
+    pid = fork();
+    if (pid < 0) {
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        close(out_pipe[0]);
+        close(err_pipe[0]);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        dup2(err_pipe[1], STDERR_FILENO);
+        close(out_pipe[1]);
+        close(err_pipe[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+
+    if (timeout_sec > 0) {
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec += timeout_sec;
+    }
+
+    while (out_open || err_open) {
+        struct pollfd fds[2];
+        int timeout_ms = -1;
+
+        if (timeout_sec > 0) {
+            struct timespec now;
+            long ms;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            ms = (deadline.tv_sec - now.tv_sec) * 1000L
+               + (deadline.tv_nsec - now.tv_nsec) / 1000000L;
+            if (ms <= 0) {
+                kill(pid, SIGKILL);
+                waitpid(pid, NULL, 0);
+                ret = -2;
+                if (exit_code) *exit_code = -1;
+                goto cleanup;
+            }
+            timeout_ms = (int)ms;
+        }
+
+        fds[0].fd     = out_open ? out_pipe[0] : -1;
+        fds[0].events = POLLIN;
+        fds[1].fd     = err_open ? err_pipe[0] : -1;
+        fds[1].events = POLLIN;
+
+        if (poll(fds, 2, timeout_ms) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        if (fds[0].revents & (POLLIN | POLLHUP | POLLERR))
+            drain_fd(out_pipe[0], stdout_buf, stdout_size, &out_total, &out_open);
+        else if (fds[0].revents & POLLNVAL)
+            out_open = 0;
+
+        if (fds[1].revents & (POLLIN | POLLHUP | POLLERR))
+            drain_fd(err_pipe[0], stderr_buf, stderr_size, &err_total, &err_open);
+        else if (fds[1].revents & POLLNVAL)
+            err_open = 0;
+    }
+
+    {
+        int status;
+        waitpid(pid, &status, 0);
+        if (exit_code)
+            *exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+    ret = 0;
+
+cleanup:
+    close(out_pipe[0]);
+    close(err_pipe[0]);
+    return ret;
+}
+
+#endif /* _WIN32 */
