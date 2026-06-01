@@ -1,0 +1,20 @@
+# Sandbox Extractor Image
+# Minimal Alpine-based image with file analysis tools.
+# Runs inside an air-gapped, read-only, capability-dropped container.
+
+FROM python:3.11-alpine
+
+RUN apk add --no-cache \
+    file \
+    poppler-utils \
+    bash \
+    curl \
+    tesseract-ocr \
+    tesseract-ocr-data-eng
+
+COPY extractor.py /opt/extractor.py
+
+RUN chmod +x /opt/extractor.py
+
+# The file to analyze is mounted at this path by the engine
+ENTRYPOINT ["python3", "/opt/extractor.py"]

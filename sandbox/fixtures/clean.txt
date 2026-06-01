@@ -1,0 +1,3 @@
+This is a clean text file used for testing the sandbox engine.
+It contains no malicious content and should pass all three layers.
+The quick brown fox jumps over the lazy dog.
