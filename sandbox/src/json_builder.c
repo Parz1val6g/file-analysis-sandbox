@@ -129,11 +129,13 @@ void json_add_int(JsonBuf *j, const char *key, long long value) {
 
 void json_add_bool(JsonBuf *j, const char *key, int value) {
     const char *b = value ? "true" : "false";
+    size_t blen = value ? 4 : 5;
     json_comma(j);
     json_escape_and_append(j, key);
-    json_grow(j, 7);
+    json_grow(j, blen + 1);
     j->buf[j->len++] = ':';
-    while (*b) j->buf[j->len++] = *b++;
+    memmove(j->buf + j->len, b, blen);
+    j->len += blen;
     j->buf[j->len] = '\0';
 }
 
@@ -156,6 +158,7 @@ void json_nested_close(JsonBuf *j) {
 
 void json_append_raw(JsonBuf *j, const char *raw) {
     size_t rlen = strlen(raw);
+    json_comma(j);
     json_grow(j, rlen);
     memmove(j->buf + j->len, raw, rlen);
     j->len += rlen;

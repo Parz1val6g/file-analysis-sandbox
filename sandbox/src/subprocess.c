@@ -2,8 +2,7 @@
  *
  * Uses CreateProcessW (Unicode) with explicit argument passing.
  * No shell, no cmd.exe — immune to command injection.
- * Pipes are used to capture stdout/stderr independently.
- * waitpid() equivalent via WaitForSingleObject with timeout.
+ * Pipes are read concurrently to prevent deadlocks.
  */
 #include "subprocess.h"
 #include <stdio.h>
@@ -11,11 +10,11 @@
 #include <string.h>
 #include <windows.h>
 
-/* Max combined command-line length before we give up */
 #define MAX_CMDLINE 32768
 
+/* ---- Command-line builder ---- */
+
 static int build_cmdline(char *const argv[], wchar_t *out, size_t out_chars) {
-    /* Build a properly quoted command line from argv[] */
     size_t pos = 0;
     int i;
 
@@ -30,7 +29,6 @@ static int build_cmdline(char *const argv[], wchar_t *out, size_t out_chars) {
             out[pos++] = L' ';
         }
 
-        /* Check if quoting is needed */
         for (p = arg; *p; p++) {
             if (*p == ' ' || *p == '\t' || *p == '"') { needs_quote = 1; break; }
         }
@@ -41,10 +39,8 @@ static int build_cmdline(char *const argv[], wchar_t *out, size_t out_chars) {
             out[pos++] = L'"';
             for (p = arg; *p; p++) {
                 int backslashes = 0;
-                /* Count backslashes before a quote */
                 while (*p == '\\') { backslashes++; p++; }
                 if (*p == '"') {
-                    /* Double the backslashes and escape the quote */
                     int j;
                     for (j = 0; j < backslashes * 2; j++) {
                         if (pos >= out_chars) return -1;
@@ -55,7 +51,6 @@ static int build_cmdline(char *const argv[], wchar_t *out, size_t out_chars) {
                     if (pos >= out_chars) return -1;
                     out[pos++] = L'"';
                 } else if (*p == '\0') {
-                    /* Trailing backslashes */
                     int j;
                     for (j = 0; j < backslashes * 2; j++) {
                         if (pos >= out_chars) return -1;
@@ -86,32 +81,72 @@ static int build_cmdline(char *const argv[], wchar_t *out, size_t out_chars) {
     return 0;
 }
 
-int subprocess_which(const char *cmd) {
-    /* On Windows, just try to find the executable */
-    char which_cmd[1024];
-    int n = snprintf(which_cmd, sizeof(which_cmd), "where %s 2>nul", cmd);
-    if (n < 0 || (size_t)n >= sizeof(which_cmd)) return 0;
+/* ---- Binary discovery (manual PATH search, no side effects) ---- */
 
-    /* Use a lightweight check — just see if CreateProcess can find it */
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    wchar_t wcmd[512];
+int subprocess_which(const char *cmd) {
+    /* Search PATH manually — avoids executing the binary like CreateProcess would */
+    char path_env[32768];
+    char test_path[MAX_PATH];
+    const char *exts[] = {".exe", ".com", ".bat", ".cmd", "", NULL};
+    DWORD len;
+    const char *start, *end;
     int i;
 
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
-    memset(&pi, 0, sizeof(pi));
-
-    for (i = 0; cmd[i] && i < 510; i++) wcmd[i] = (wchar_t)(unsigned char)cmd[i];
-    wcmd[i] = L'\0';
-
-    if (CreateProcessW(NULL, wcmd, NULL, NULL, FALSE,
-                       CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return 1;
+    /* Check current directory first */
+    for (i = 0; exts[i]; i++) {
+        snprintf(test_path, sizeof(test_path), "%s%s", cmd, exts[i]);
+        if (GetFileAttributesA(test_path) != INVALID_FILE_ATTRIBUTES)
+            return 1;
     }
+
+    /* Search PATH */
+    len = GetEnvironmentVariableA("PATH", path_env, sizeof(path_env));
+    if (len == 0 || len >= sizeof(path_env)) return 0;
+
+    start = path_env;
+    while (*start) {
+        /* Find end of this PATH entry (semicolon-delimited) */
+        end = strchr(start, ';');
+        if (!end) end = start + strlen(start);
+
+        if (end > start && (size_t)(end - start) + strlen(cmd) + 5 < MAX_PATH) {
+            size_t dirlen = (size_t)(end - start);
+            memmove(test_path, start, dirlen);
+            if (dirlen > 0 && test_path[dirlen - 1] != '\\' && test_path[dirlen - 1] != '/')
+                test_path[dirlen++] = '\\';
+            memmove(test_path + dirlen, cmd, strlen(cmd) + 1);
+
+            for (i = 0; exts[i]; i++) {
+                char full[MAX_PATH];
+                snprintf(full, sizeof(full), "%s%s", test_path, exts[i]);
+                if (GetFileAttributesA(full) != INVALID_FILE_ATTRIBUTES)
+                    return 1;
+            }
+        }
+
+        start = (*end) ? end + 1 : end;
+    }
+
     return 0;
+}
+
+/* ---- Secure process execution ---- */
+
+/* Read available data from a pipe handle */
+static DWORD drain_pipe(HANDLE h, char *buf, size_t bufsize, size_t *total) {
+    DWORD avail, nread;
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || avail == 0)
+        return 0;
+    if (*total >= bufsize - 1)
+        return 0;
+    DWORD space = (DWORD)(bufsize - *total - 1);
+    DWORD to_read = (avail < space) ? avail : space;
+    if (!ReadFile(h, buf + *total, to_read, &nread, NULL))
+        return 0;
+    *total += nread;
+    if (*total < bufsize)
+        buf[*total] = '\0';
+    return nread;
 }
 
 int subprocess_run(
@@ -130,33 +165,29 @@ int subprocess_run(
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     wchar_t wcmd[MAX_CMDLINE / 2];
-    DWORD wait_result, avail;
+    DWORD wait_result;
     int ret = -1;
+    size_t out_total = 0, err_total = 0;
 
-    if (!cmd || !argv) return -1;
+    (void)cmd; /* argv[0] is the actual executable; cmd is kept for API compatibility */
 
-    /* Init output buffers */
+    if (!argv) return -1;
+
     if (stdout_buf && stdout_size > 0) stdout_buf[0] = '\0';
     if (stderr_buf && stderr_size > 0) stderr_buf[0] = '\0';
 
-    /* Security attributes for inheritable handles */
     memset(&sa, 0, sizeof(sa));
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
-    sa.lpSecurityDescriptor = NULL;
 
-    /* Create pipes for stdout */
     if (!CreatePipe(&h_stdout_rd, &h_stdout_wr, &sa, 0)) goto cleanup;
     if (!SetHandleInformation(h_stdout_rd, HANDLE_FLAG_INHERIT, 0)) goto cleanup;
 
-    /* Create pipes for stderr */
     if (!CreatePipe(&h_stderr_rd, &h_stderr_wr, &sa, 0)) goto cleanup;
     if (!SetHandleInformation(h_stderr_rd, HANDLE_FLAG_INHERIT, 0)) goto cleanup;
 
-    /* Build command line */
     if (build_cmdline(argv, wcmd, MAX_CMDLINE / 2) != 0) goto cleanup;
 
-    /* Startup info */
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
     si.hStdOutput = h_stdout_wr;
@@ -166,63 +197,50 @@ int subprocess_run(
 
     memset(&pi, 0, sizeof(pi));
 
-    /* Spawn */
-    if (!CreateProcessW(
-            NULL,              /* lpApplicationName — let system resolve from cmdline */
-            wcmd,              /* lpCommandLine */
-            NULL, NULL,        /* process/thread security */
-            TRUE,              /* inherit handles */
-            CREATE_NO_WINDOW,  /* dwCreationFlags */
-            NULL, NULL,        /* environment / cwd */
-            &si, &pi)) {
+    if (!CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, NULL, &si, &pi))
         goto cleanup;
-    }
 
-    /* Close write ends so reads don't hang */
+    /* Close our write ends so reads don't block */
     CloseHandle(h_stdout_wr); h_stdout_wr = NULL;
     CloseHandle(h_stderr_wr); h_stderr_wr = NULL;
 
-    /* Wait with timeout */
-    if (timeout_sec > 0) {
-        wait_result = WaitForSingleObject(pi.hProcess, (DWORD)(timeout_sec * 1000));
-    } else {
-        wait_result = WaitForSingleObject(pi.hProcess, INFINITE);
-    }
+    /* Wait loop with concurrent pipe draining (prevents deadlocks) */
+    for (;;) {
+        DWORD remaining = (DWORD)(timeout_sec > 0 ? timeout_sec * 1000 : INFINITE);
 
-    if (wait_result == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 1);
-        ret = -2;
-        if (exit_code) *exit_code = -1;
-        goto cleanup;
-    }
+        /* Wait for process exit OR pipe data */
+        HANDLE handles[3] = { pi.hProcess, h_stdout_rd, h_stderr_rd };
+        DWORD nhandles = 1;
+        if (h_stdout_rd) handles[nhandles++] = h_stdout_rd;
+        if (h_stderr_rd) handles[nhandles++] = h_stderr_rd;
 
-    /* Read stdout */
-    if (stdout_buf && stdout_size > 1) {
-        DWORD nread = 0, total = 0;
-        while (PeekNamedPipe(h_stdout_rd, NULL, 0, NULL, &avail, NULL) && avail > 0) {
-            DWORD to_read = (avail < (stdout_size - total - 1)) ? avail : (DWORD)(stdout_size - total - 1);
-            if (to_read == 0) break;
-            if (!ReadFile(h_stdout_rd, stdout_buf + total, to_read, &nread, NULL) || nread == 0)
-                break;
-            total += nread;
+        wait_result = WaitForMultipleObjects(nhandles, handles, FALSE, remaining);
+
+        /* Drain both pipes concurrently */
+        if (stdout_buf && stdout_size > 1)
+            drain_pipe(h_stdout_rd, stdout_buf, stdout_size, &out_total);
+        if (stderr_buf && stderr_size > 1)
+            drain_pipe(h_stderr_rd, stderr_buf, stderr_size, &err_total);
+
+        if (wait_result == WAIT_OBJECT_0) {
+            /* Process exited — drain remaining pipe data */
+            Sleep(50); /* Small grace period for final pipe flush */
+            if (stdout_buf) drain_pipe(h_stdout_rd, stdout_buf, stdout_size, &out_total);
+            if (stderr_buf) drain_pipe(h_stderr_rd, stderr_buf, stderr_size, &err_total);
+            ret = 0;
+            break;
         }
-        if (total < stdout_size) stdout_buf[total] = '\0';
-    }
 
-    /* Read stderr */
-    if (stderr_buf && stderr_size > 1) {
-        DWORD nread = 0, total = 0;
-        while (PeekNamedPipe(h_stderr_rd, NULL, 0, NULL, &avail, NULL) && avail > 0) {
-            DWORD to_read = (avail < (stderr_size - total - 1)) ? avail : (DWORD)(stderr_size - total - 1);
-            if (to_read == 0) break;
-            if (!ReadFile(h_stderr_rd, stderr_buf + total, to_read, &nread, NULL) || nread == 0)
-                break;
-            total += nread;
+        if (wait_result == WAIT_TIMEOUT || wait_result == WAIT_FAILED) {
+            TerminateProcess(pi.hProcess, 1);
+            ret = -2;
+            if (exit_code) *exit_code = -1;
+            goto cleanup;
         }
-        if (total < stderr_size) stderr_buf[total] = '\0';
+        /* Otherwise: pipe data available — loop and wait again */
     }
 
-    /* Get exit code */
     if (exit_code) {
         DWORD ec;
         if (GetExitCodeProcess(pi.hProcess, &ec))
@@ -230,8 +248,6 @@ int subprocess_run(
         else
             *exit_code = -1;
     }
-
-    ret = 0;  /* success */
 
 cleanup:
     if (h_stdout_rd) CloseHandle(h_stdout_rd);

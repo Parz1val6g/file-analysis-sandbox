@@ -124,6 +124,7 @@ int sha256_file(const char *path, uint8_t out[SHA256_DIGEST_SIZE]) {
     sha256_init(&ctx);
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
         sha256_update(&ctx, buf, n);
+    if (ferror(f)) { fclose(f); return -1; }
     fclose(f);
     sha256_final(&ctx, out);
     return 0;
