@@ -1,20 +1,18 @@
-# Sandbox Extractor Image
-# Minimal Alpine-based image with file analysis tools.
-# Runs inside an air-gapped, read-only, capability-dropped container.
+# Sandbox Extractor Image — multi-stage C build
+# Stage 1: compile the C extractor
+FROM alpine:3.19 AS builder
+RUN apk add --no-cache build-base
+COPY extractor.c /tmp/extractor.c
+RUN gcc -O2 -s -Wall -Werror -o /extractor /tmp/extractor.c
 
-FROM python:3.11-alpine
-
+# Stage 2: minimal runtime image
+FROM alpine:3.19
 RUN apk add --no-cache \
     file \
     poppler-utils \
-    bash \
-    curl \
     tesseract-ocr \
     tesseract-ocr-data-eng
+COPY --from=builder /extractor /opt/extractor
+RUN chmod +x /opt/extractor
 
-COPY extractor.py /opt/extractor.py
-
-RUN chmod +x /opt/extractor.py
-
-# The file to analyze is mounted at this path by the engine
-ENTRYPOINT ["python3", "/opt/extractor.py"]
+ENTRYPOINT ["/opt/extractor"]

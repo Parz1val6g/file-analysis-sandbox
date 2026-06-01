@@ -1,53 +1,47 @@
-# Makefile — Sandbox File Analysis Engine (C Edition)
+# Makefile — Sandbox File Analysis Engine (C Only)
 #
 # Build:   make
-# Clean:   make clean
 # Test:    make test
-#
-# Compiler flags follow security best practices:
-#   -Wall -Wextra -Werror   : strict warnings as errors
-#   -O2                      : optimise
-#   -fstack-protector-strong : stack canaries
-#   -D_FORTIFY_SOURCE=2      : glibc fortification (Linux only)
+# Clean:   make clean
 
 CC       ?= gcc
-CFLAGS   += -Wall -Wextra -Werror -O2
-LDFLAGS  +=
+CFLAGS   += -Wall -Wextra -Werror -O2 -fstack-protector-strong
 
 SRCDIR   = src
-OBJDIR   = obj
+TESTDIR  = tests
+BINDIR   = .
 TARGET   = sandbox_engine
+TESTBIN  = test_runner
 ifeq ($(OS),Windows_NT)
     TARGET := $(TARGET).exe
+    TESTBIN := $(TESTBIN).exe
 endif
 
-# Detect compiler for platform-specific flags
+# Detect TCC (limited flags)
 ifeq ($(CC),tcc)
-    # TCC has limited flag support — keep it minimal
     CFLAGS = -Wall
-else
-    CFLAGS += -fstack-protector-strong
-    # -fPIE is added conditionally below
 endif
 
 SRCS = $(wildcard $(SRCDIR)/*.c)
-OBJS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(SRCS))
+OBJS = $(patsubst $(SRCDIR)/%.c,$(SRCDIR)/%.o,$(SRCS))
 
 .PHONY: all clean test
 
 all: $(TARGET)
 
-$(OBJDIR):
-	mkdir -p $(OBJDIR)
-
-$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-test: $(TARGET)
-	python -m pytest tests/ -v
+$(SRCDIR)/%.o: $(SRCDIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Test runner
+$(TESTBIN): $(TESTDIR)/test_runner.c $(TARGET)
+	$(CC) $(CFLAGS) $(TESTDIR)/test_runner.c -o $@
+
+test: $(TARGET) $(TESTBIN)
+	cd sandbox && ./$(TESTBIN)
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET)
+	rm -f $(SRCDIR)/*.o $(TARGET) $(TESTBIN) *.tmp
+	rm -f sandbox/$(TARGET) sandbox/$(TESTBIN)
