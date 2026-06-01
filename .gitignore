@@ -59,3 +59,14 @@ htmlcov/
 *.temp
 tmp/
 temp/
+
+# C build artifacts
+sandbox/sandbox_engine.exe
+sandbox/sandbox_engine
+sandbox/obj/
+*.o
+*.obj
+
+# Test output leakage
+stdout.txt
+stderr.txt
