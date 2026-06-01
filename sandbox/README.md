@@ -6,20 +6,25 @@ libraries beyond `libc` and the OS system call interface.
 
 ## Quick Start
 
+All commands run from the **project root** (where `build.bat` lives).
+
 ```bash
-# Windows (one-click)
-.\build.bat
+# Windows (one-click — downloads TCC if needed)
+build.bat
 
 # Unix
-cd sandbox && make
+cd sandbox && make           # build only
+cd sandbox && make test      # build + run 21 tests
+```
 
-# Run
-sandbox\sandbox_engine.exe path\to\file.pdf        # Windows
-./sandbox/sandbox_engine path/to/file.pdf           # Unix
+```bash
+# Run manually
+sandbox\sandbox_engine.exe sandbox\fixtures\clean.txt    # Windows
+./sandbox/sandbox_engine sandbox/fixtures/clean.txt      # Unix
 
-# Test
-sandbox\test_runner.exe                             # Windows
-cd sandbox && ./test_runner                         # Unix
+# Run test suite
+sandbox\test_runner.exe                                   # Windows
+cd sandbox && ./test_runner                              # Unix
 ```
 
 ## Build Requirements
@@ -118,10 +123,13 @@ Container isolation:
 
 ## Test Suite
 
-The C test runner covers all three layers plus edge cases:
+The C test runner covers all three layers plus edge cases.
+**Must be run from the `sandbox/` directory** (uses relative paths to find the engine and fixtures).
 
 ```bash
-sandbox\test_runner.exe
+cd sandbox
+.\test_runner.exe          # Windows
+./test_runner              # Unix
 ```
 
 | Area | Tests |

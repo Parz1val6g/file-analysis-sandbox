@@ -40,8 +40,7 @@ $(TESTBIN): $(TESTDIR)/test_runner.c $(TARGET)
 	$(CC) $(CFLAGS) $(TESTDIR)/test_runner.c -o $@
 
 test: $(TARGET) $(TESTBIN)
-	cd sandbox && ./$(TESTBIN)
+	./$(TESTBIN)
 
 clean:
 	rm -f $(SRCDIR)/*.o $(TARGET) $(TESTBIN) *.tmp
-	rm -f sandbox/$(TARGET) sandbox/$(TESTBIN)
